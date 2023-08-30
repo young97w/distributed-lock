@@ -8,5 +8,6 @@ if redis.call('Get',key) == value then
     else
         return "refresh failed"
     end
+else
     return "not hold"
 end
