@@ -4,6 +4,7 @@ import (
 	"context"
 	_ "embed"
 	"errors"
+	"fmt"
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 	"time"
@@ -25,9 +26,9 @@ type Client struct {
 	c *redis.Client
 }
 
-func (c *Client) TryLock(key string, maxCount int, ctx context.Context, timeout time.Duration) (*Lock, error) {
+func (c *Client) TryLock(key string, maxCount int, ctx context.Context, duration time.Duration) (*Lock, error) {
 	value := uuid.New().String()
-	ok, err := c.c.SetNX(ctx, key, value, timeout).Result()
+	ok, err := c.c.SetNX(ctx, key, value, duration).Result()
 	if err != nil {
 		return nil, err
 	}
@@ -38,7 +39,7 @@ func (c *Client) TryLock(key string, maxCount int, ctx context.Context, timeout 
 		key:         key,
 		value:       value,
 		c:           c.c,
-		timeout:     timeout,
+		duration:    duration,
 		maxCount:    maxCount,
 		timeoutChan: make(chan struct{}, 1),
 		unlockChan:  make(chan struct{}, 1),
@@ -50,7 +51,7 @@ type Lock struct {
 	key         string
 	value       string
 	c           *redis.Client
-	timeout     time.Duration
+	duration    time.Duration
 	maxCount    int
 	ctx         context.Context
 	timeoutChan chan struct{}
@@ -58,50 +59,62 @@ type Lock struct {
 }
 
 func (l *Lock) Unlock() error {
-	res, err := l.c.Eval(l.ctx, luaUnlock, []string{l.key}).Result()
+	res, err := l.c.Eval(l.ctx, luaUnlock, []string{l.key}, l.value).Result()
 	if err != nil {
 		l.unlockChan <- struct{}{}
 		return err
 	}
-	if res != "OK" {
-		return errUnlockKeyFailed
+	if res == 0 {
+		fmt.Println(res)
+		return errKeyNotExist
 	}
 	return nil
 }
 
-func (l *Lock) Refresh() error {
-	res, err := l.c.Eval(l.ctx, luaRefresh, []string{l.key}, l.timeout).Result()
+func (l *Lock) Refresh(ctx context.Context) error {
+	res, err := l.c.Eval(ctx, luaRefresh, []string{l.key}, l.value, l.duration.Seconds()).Result()
 	if err != nil {
 		return err
 	}
-	if res != "OK" {
-		return errRefreshLockFailed
+	if res == 0 {
+		return err
 	}
 	return nil
 }
 
-func (l *Lock) AutoRefresh(maxCnt int) error {
-	ticker := time.NewTicker(l.timeout)
+func (l *Lock) AutoRefresh(duration time.Duration) error {
+	ticker := time.NewTicker(duration)
 	count := 0
 	for {
 		select {
 		case <-ticker.C:
-			err := l.Refresh()
+			ctx, cancel := context.WithTimeout(l.ctx, l.duration)
+			err := l.Refresh(ctx)
+			cancel()
 			if errors.Is(err, context.DeadlineExceeded) {
 				l.timeoutChan <- struct{}{}
+				continue
 			}
-			return err
+			if err != nil {
+				return err
+			}
+			count = 0
 		case <-l.timeoutChan:
 			count++
 			if count > l.maxCount {
-				return errRetryTooManyTimes
+				return context.DeadlineExceeded
 			}
-			err := l.Refresh()
+			ctx, cancel := context.WithTimeout(l.ctx, l.duration)
+			err := l.Refresh(ctx)
+			cancel()
 			if errors.Is(err, context.DeadlineExceeded) {
-				ticker.Reset(l.timeout)
+				ticker.Reset(l.duration)
 				l.timeoutChan <- struct{}{}
+				continue
 			}
-			return err
+			if err != nil {
+				return err
+			}
 		case <-l.unlockChan:
 			return nil
 		}

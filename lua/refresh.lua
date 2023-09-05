@@ -1,13 +1,6 @@
-key = KEYS[1]
-value = ARGV[1]
-timeout = ARGV[2]
 
-if redis.call('Get',key) == value then
-    if redis.call('Set',key,value,timeout) == "OK" then
-        return "OK"
-    else
-        return "refresh failed"
-    end
+if redis.call('Get',KEYS[1]) == ARGV[1] then
+    return redis.call('expire',KEYS[1],ARGV[2])
 else
-    return "not hold"
+    return 0
 end
