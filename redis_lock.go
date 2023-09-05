@@ -20,6 +20,8 @@ var (
 	luaRefresh string
 	//go:embed lua/unlock.lua
 	luaUnlock string
+	//go:embed lua/lock.lua
+	luaLock string
 )
 
 type Client struct {
@@ -45,6 +47,45 @@ func (c *Client) TryLock(key string, maxCount int, ctx context.Context, duration
 		unlockChan:  make(chan struct{}, 1),
 		ctx:         ctx,
 	}, nil
+}
+
+func (c *Client) Lock(key string, maxCount int, ctx context.Context, duration, timeout time.Duration) (*Lock, error) {
+	var ticker *time.Ticker
+	cnt := 0
+	value := uuid.New().String()
+	for cnt < maxCount {
+		lctx, cancel := context.WithTimeout(ctx, timeout)
+		res, err := c.c.Eval(lctx, luaLock, []string{key}, value, duration.Seconds()).Result()
+		cancel()
+		if err != nil && errors.Is(err, context.DeadlineExceeded) {
+			return nil, err
+		}
+		if res == 1 {
+			return &Lock{
+				key:         key,
+				value:       value,
+				c:           c.c,
+				duration:    duration,
+				maxCount:    maxCount,
+				ctx:         ctx,
+				timeoutChan: make(chan struct{}),
+				unlockChan:  make(chan struct{}),
+			}, nil
+		}
+
+		if ticker == nil {
+			ticker = time.NewTicker(timeout)
+		} else {
+			ticker.Reset(timeout)
+		}
+
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	return nil, errRetryTooManyTimes
 }
 
 type Lock struct {

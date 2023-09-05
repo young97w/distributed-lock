@@ -2,6 +2,7 @@ package distributed_lock
 
 import (
 	"context"
+	"fmt"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/stretchr/testify/require"
@@ -35,8 +36,11 @@ func TestClient_ref(t *testing.T) {
 	}
 	l, err := client.TryLock("d-lock", 20, context.Background(), time.Second*2)
 	require.NoError(t, err)
-	err = l.Refresh(context.Background())
+	go l.AutoRefresh(time.Second)
+	time.Sleep(time.Second * 3)
 	require.NoError(t, err)
+	res, _ := rc.Get(context.Background(), "d-lock").Result()
+	fmt.Println(res)
 	err = l.Unlock()
 	//rc.Del(context.Background(), "d-lock")
 	require.NoError(t, err)
