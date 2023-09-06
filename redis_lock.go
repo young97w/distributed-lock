@@ -4,7 +4,6 @@ import (
 	"context"
 	_ "embed"
 	"errors"
-	"fmt"
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 	"time"
@@ -54,13 +53,14 @@ func (c *Client) Lock(key string, maxCount int, ctx context.Context, duration, t
 	cnt := 0
 	value := uuid.New().String()
 	for cnt < maxCount {
+		cnt++
 		lctx, cancel := context.WithTimeout(ctx, timeout)
 		res, err := c.c.Eval(lctx, luaLock, []string{key}, value, duration.Seconds()).Result()
 		cancel()
 		if err != nil && errors.Is(err, context.DeadlineExceeded) {
 			return nil, err
 		}
-		if res == 1 {
+		if res == "OK" {
 			return &Lock{
 				key:         key,
 				value:       value,
@@ -68,8 +68,8 @@ func (c *Client) Lock(key string, maxCount int, ctx context.Context, duration, t
 				duration:    duration,
 				maxCount:    maxCount,
 				ctx:         ctx,
-				timeoutChan: make(chan struct{}),
-				unlockChan:  make(chan struct{}),
+				timeoutChan: make(chan struct{}, 1),
+				unlockChan:  make(chan struct{}, 1),
 			}, nil
 		}
 
@@ -106,7 +106,7 @@ func (l *Lock) Unlock() error {
 		return err
 	}
 	if res == 0 {
-		fmt.Println(res)
+		l.unlockChan <- struct{}{}
 		return errKeyNotExist
 	}
 	return nil
